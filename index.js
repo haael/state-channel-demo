@@ -47,24 +47,18 @@ async function loadAccount(name, save) {
 	return account;
 }
 
-
-
-
-
-
-
-
-
-
 function Channel() {
 	this.senderAddress = "";
 	this.recipientAddress = "";
 	this.balance = 0;
 	this.funds = 0;
-	this.senderCounter = 0;
-	this.recipientCounter = 0;
+	this.senderSerial = 0;
+	this.recipientSerial = 0;
+	this.senderOK = false;
+	this.recipientOK = false;
+	this.lastTransfer = null;
 }
-	
+
 Channel.prototype.read = async function() {
 	if(!this.contract.address) throw "Contract not mined yet.";
 
@@ -72,8 +66,12 @@ Channel.prototype.read = async function() {
 	this.recipientAddress = await this.contract.methods.channelRecipient().call();
 	this.balance = await this.contract.methods.balance().call();
 	this.funds = await this.contract.methods.funds().call();
-	this.senderCounter = await this.contract.methods.senderSerial().call();
-	this.recipientCounter = await this.contract.methods.recipientSerial().call();
+	this.senderSerial = await this.contract.methods.senderSerial().call();
+	this.recipientSerial = await this.contract.methods.recipientSerial().call();
+	this.senderOK = await this.contract.methods.senderOK().call();
+	this.recipientOK = await this.contract.methods.recipientOK().call();
+	
+	this.lastTransfer = null;
 }
 
 Channel.prototype.transfer = function(value) {
@@ -88,36 +86,36 @@ Channel.prototype.transfer = function(value) {
 Channel.prototype.transferToRecipient = function(value) {
 	if(this.balance.add(value).gt(this.funds)) throw "Not enough funds";
 	this.balance = this.balance.add(value);
-	this.senderCounter = this.senderCounter.add(1);
-	return { balance: this.balance.toString(), senderSerial: this.senderCounter.toString(), recipientSerial: this.recipientCounter.toString(), signature: this.signature() };
+	this.senderSerial = this.senderSerial.add(1);
+	return { balance: this.balance.toString(), senderSerial: this.senderSerial.toString(), recipientSerial: this.recipientSerial.toString(), signature: this.signature() };
 }
 
 Channel.prototype.transferToSender = function(value) {
 	if(this.balance.lt(value)) throw "Not enough funds";
 	this.balance = this.balance.sub(value);
-	this.recipientCounter = this.recipientCounter.add(1);
-	return { balance: this.balance.toString(), senderSerial: this.senderCounter.toString(), recipientSerial: this.recipientCounter.toString(), signature: this.signature() };
+	this.recipientSerial = this.recipientSerial.add(1);
+	return { balance: this.balance.toString(), senderSerial: this.senderSerial.toString(), recipientSerial: this.recipientSerial.toString(), signature: this.signature() };
 }
 
 Channel.prototype.signature = function() {
-	const message = web3.eth.abi.encodeParameters(['address', 'uint', 'uint', 'uint'], [this.contract.address, this.balance, this.senderCounter, this.recipientCounter]);
+	const message = web3.eth.abi.encodeParameters(['address', 'uint', 'uint', 'uint'], [this.contract.address, this.balance, this.senderSerial, this.recipientSerial]);
 	const sig = web3.eth.accounts.sign(message, privateKey);
 	return [ sig.r, sig.s, sig.v ];
 }
 
 Channel.prototype.accept = function(transfer) {
 	const oldBalance = this.balance;
-	const oldSenderCounter = this.senderCounter;
-	const oldRecipientCounter = this.recipientCounter;
+	const oldSenderCounter = this.senderSerial;
+	const oldRecipientCounter = this.recipientSerial;
 	
 	this.balance = new (this.balance.constructor)(transfer.balance);
-	this.senderCounter = new (this.senderCounter.constructor)(transfer.senderSerial);
-	this.recipientCounter = new (this.recipientCounter.constructor)(transfer.recipientSerial);
+	this.senderSerial = new (this.senderSerial.constructor)(transfer.senderSerial);
+	this.recipientSerial = new (this.recipientSerial.constructor)(transfer.recipientSerial);
 	
 	const r = transfer.signature[0];
 	const s = transfer.signature[1];
 	const v = transfer.signature[2];
-	const message = web3.eth.abi.encodeParameters(['address', 'uint', 'uint', 'uint'], [this.contract.address, this.balance, this.senderCounter, this.recipientCounter]);
+	const message = web3.eth.abi.encodeParameters(['address', 'uint', 'uint', 'uint'], [this.contract.address, this.balance, this.senderSerial, this.recipientSerial]);
 	//console.log(message, v, r, s);
 	const signer = web3.eth.accounts.recover(message, v, r, s);
 	
@@ -125,12 +123,12 @@ Channel.prototype.accept = function(transfer) {
 	
 	if(this.senderAddress.toLowerCase() == web3.eth.defaultAccount.toLowerCase() && signer.toLowerCase() == this.recipientAddress.toLowerCase()) {
 		ok = true;
-		if(!this.senderCounter.eq(oldSenderCounter)) ok = false;
-		if(this.recipientCounter.lte(oldRecipientCounter)) ok = false;
+		if(!this.senderSerial.eq(oldSenderCounter)) ok = false;
+		if(this.recipientSerial.lte(oldRecipientCounter)) ok = false;
 	} else if(this.recipientAddress.toLowerCase() == web3.eth.defaultAccount.toLowerCase() && signer.toLowerCase() == this.senderAddress.toLowerCase()) {
 		ok = true;
-		if(this.senderCounter.lte(oldSenderCounter)) ok = false;
-		if(!this.recipientCounter.eq(oldRecipientCounter)) ok = false;
+		if(this.senderSerial.lte(oldSenderCounter)) ok = false;
+		if(!this.recipientSerial.eq(oldRecipientCounter)) ok = false;
 	} else {
 		ok = false;
 	}
@@ -140,19 +138,32 @@ Channel.prototype.accept = function(transfer) {
 	
 	if(!ok) {
 		this.balance = oldBalance;
-		this.senderCounter = oldSenderCounter;
-		this.recipientCounter = oldRecipientCounter;
+		this.senderSerial = oldSenderCounter;
+		this.recipientSerial = oldRecipientCounter;
+	} else {
+		this.lastTransfer = transfer;
 	}
 	return ok;
 }
 
 Channel.prototype.update = async function() {
-	const sig = this.signature();
-	const r = sig[0];
-	const s = sig[1];
-	const v = sig[2];
+	const transfer = this.lastTransfer;
 	
-	const transaction = this.contract.methods.UpdateChannel(this.balance, this.senderCounter, this.recipientCounter, v, r, s);
+	if(!transfer)
+		throw "No transfer saved.";
+	
+	const nBalance = new (this.balance.constructor)(transfer.balance);
+	const nSenderSerial = new (this.senderSerial.constructor)(transfer.senderSerial);
+	const nRecipientSerial = new (this.recipientSerial.constructor)(transfer.recipientSerial);
+	
+	if(!(this.balance.eq(nBalance) && this.senderSerial.eq(nSenderSerial) && this.recipientSerial.eq(nRecipientSerial)))
+		throw "Transfer does not match channel state.";
+	
+	const r = transfer.signature[0];
+	const s = transfer.signature[1];
+	const v = transfer.signature[2];
+	
+	const transaction = this.contract.methods.UpdateChannel(this.balance, this.senderSerial, this.recipientSerial, v, r, s);
 	var gas;
 	try {
 		gas = await transaction.estimateGas();
@@ -379,7 +390,7 @@ async function main() {
 	var running = true;
 	while(running) {
 		console.log();
-		console.log("total funds:", web3.utils.fromWei(channel.funds.toString(), 'ether') + "ETH", "balance:", web3.utils.fromWei(channel.balance.toString(), 'ether') + "ETH");
+		console.log("total funds:", web3.utils.fromWei(channel.funds.toString(), 'ether') + "ETH", "balance:", web3.utils.fromWei(channel.balance.toString(), 'ether') + "ETH", "approvals:", channel.senderOK, channel.recipientOK);
 		const cmd = await readLine("> ");
 		
 		if(cmd == '?') {
@@ -393,12 +404,21 @@ async function main() {
 		} else if(cmd == 'q') {
 			running = false;
 		} else if(cmd == 's') {
-			await channel.update();
+			try {
+				await channel.update();
+			} catch(error) {
+				console.log(error);
+				console.log("You may only save the state right after receiving a transfer.");
+			}
 		} else if(cmd == 'r') {
 			await channel.read();
 		} else if(cmd == 'c') {
-			await channel.close();
-			fs.unlinkSync('contract.txt');
+			try {
+				await channel.close();
+				fs.unlinkSync('contract.txt');
+			} catch(error) {
+				console.log("could not close channel");
+			}
 		} else {
 			try {
 				const value = web3.utils.toWei(cmd, 'ether');

@@ -12,12 +12,8 @@ contract Channel {
 	uint public funds;
 	uint public senderSerial;
 	uint public recipientSerial;
-	bool private senderOK;
-	bool private recipientOK;
-	
-	//bytes public lastHash;
-	//bytes public lastMessage;
-	//address public lastSigner;
+	bool public senderOK;
+	bool public recipientOK;
 	
 	constructor(address payable sender, address payable recipient, uint timeout) public payable {
 		require(sender != recipient);
@@ -52,25 +48,18 @@ contract Channel {
 	}
 	
 	function UpdateChannel(uint nBalance, uint nSenderSerial, uint nRecipientSerial, uint8 signature_v, bytes32 signature_r, bytes32 signature_s) public {
-		bytes32 msghash;
-		address signer;
-		
+		require(msg.sender == channelRecipient || msg.sender == channelSender);									// only channel endpoints may modify it
 		require(startDate + channelTimeout > now);																// timeout?
 		require(nRecipientSerial >= recipientSerial && nSenderSerial >= senderSerial);							// counters must go up
 		require(nBalance <= funds);																				// balance must not exceed deposited funds
 		
 		bytes memory prefix = "\x19Ethereum Signed Message:\n";
 		bytes memory message = abi.encode(address(this), nBalance, nSenderSerial, nRecipientSerial);
-		msghash = keccak256(abi.encodePacked(prefix, uint2str(message.length), message));						// message hash
-		
-		signer = ecrecover(msghash, signature_v, signature_r, signature_s); 									// message signer
-		//lastSigner = signer;
-		//lastHash = msgHash;
-		//lastMessage = message;
+		bytes32 msghash = keccak256(abi.encodePacked(prefix, uint2str(message.length), message));				// message hash
+		address signer = ecrecover(msghash, signature_v, signature_r, signature_s); 							// message signer
 		
 		require(signer == channelRecipient || signer == channelSender);											// signer must be one of the channel endpoints
-		//if(signer != channelRecipient && signer != channelSender)
-		//	return;
+		require(msg.sender != signer);																			// you may not sign a transfer to yourself
 		
 		if(nBalance != balance) {																				// if balance changed, remove aprovals
 			senderOK = false;
@@ -87,10 +76,10 @@ contract Channel {
 	}
 
 	function CloseChannel() public {
-		if (startDate + channelTimeout > now || (senderOK && recipientOK)) { 									// timeout passed or approvals OK
-			if(!channelRecipient.send(balance)) { /* ignore send error */ }										// clear balance
-			selfdestruct(channelSender);																		// close channel
-		}
+		require((startDate + channelTimeout <= now) || (senderOK && recipientOK)); 								// timeout passed or approvals OK
+		if(!channelRecipient.send(balance)) { /* ignore transfer error */ }										// clear balance
+		selfdestruct(channelSender);																			// close channel
+
 	}
 
 }
